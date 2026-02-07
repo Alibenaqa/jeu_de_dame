@@ -3,3 +3,10 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+test_b9.py
+test_board.py
+test_chain_backend.py
+test_chain_backend.py
+test_game.py
+test_king.py
+test_promo.py
