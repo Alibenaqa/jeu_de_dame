@@ -77,7 +77,28 @@ class Game:
             return BLACK
 
         return None
+    def legal_moves_for(self, color: str):
+        """
+        Retourne une liste de coups sous forme:
+        (piece, (to_row,to_col), captured_list)
+        """
+        all_moves = []
+        must_capture = self._has_any_capture(color)
 
+        for r in range(8):
+            for c in range(8):
+                p = self.board.get_piece(r, c)
+                if p is None or p.color != color:
+                    continue
+
+                moves = self.board.get_valid_moves(p)
+                if must_capture:
+                    moves = self._capture_moves_only(moves)
+
+                for (tr, tc), captured in moves.items():
+                    all_moves.append((p, (tr, tc), captured))
+
+        return all_moves
     # -------------------------
     # UX : annuler sélection (si pas en chaîne)
     # -------------------------
