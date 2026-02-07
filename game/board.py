@@ -105,18 +105,18 @@ class Board:
 
             return moves
 
-               # =========================
-        # CAS PION (déplacement avant, capture avant+arrière)
+                  # =========================
+        # CAS PION (déplacement avant, capture avant)
         # =========================
 
-        # déplacements simples (avant seulement)
+        # déplacements simples (avant)
         if piece.color == WHITE:
             move_dirs = [(-1, -1), (-1, 1)]
         else:  # BLACK
             move_dirs = [(1, -1), (1, 1)]
 
-        # captures (dans les 4 diagonales)
-        capture_dirs = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        # captures (avant seulement)
+        capture_dirs = move_dirs
 
         # 1) Déplacements simples
         for d_row, d_col in move_dirs:

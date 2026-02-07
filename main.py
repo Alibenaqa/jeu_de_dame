@@ -1,15 +1,24 @@
 import pygame
 from game.game import Game
-from ui.renderer import Renderer, WIDTH, HEIGHT, SQUARE_SIZE
+from ui.renderer import Renderer, WIDTH, HEIGHT, SQUARE_SIZE, HUD_HEIGHT
 
 FPS = 60
 
 
 def get_row_col_from_mouse(pos):
     x, y = pos
+
+    # clic dans le HUD => pas une case
+    if y < HUD_HEIGHT:
+        return None
+
+    y -= HUD_HEIGHT
     row = y // SQUARE_SIZE
     col = x // SQUARE_SIZE
-    return row, col
+
+    if 0 <= row < 8 and 0 <= col < 8:
+        return row, col
+    return None
 
 
 def main():
@@ -25,33 +34,49 @@ def main():
     while running:
         clock.tick(FPS)
 
+        winner = game.winner()
+
+        # update capture flash timer
+        if game.capture_flash_frames > 0:
+            game.capture_flash_frames -= 1
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
 
             if event.type == pygame.MOUSEBUTTONDOWN:
-                row, col = get_row_col_from_mouse(pygame.mouse.get_pos())
+                mouse_pos = pygame.mouse.get_pos()
 
-                # Si aucune pièce sélectionnée -> tenter select
+                # reset button
+                if renderer.get_reset_rect().collidepoint(mouse_pos):
+                    game = Game()
+                    continue
+
+                # si gagnant => on bloque tout sauf reset
+                if winner is not None:
+                    continue
+
+                rc = get_row_col_from_mouse(mouse_pos)
+                if rc is None:
+                    continue
+                row, col = rc
+
+                # 🔁 Recliquer la même pièce = annuler sélection (si pas en chaîne)
+                if (
+                    game.selected is not None
+                    and (row, col) == (game.selected.row, game.selected.col)
+                ):
+                    game.cancel_selection()
+                    continue
+
                 if game.selected is None:
                     game.select(row, col)
                 else:
-                    # sinon tenter move, sinon reselect une autre pièce
-                        moved = game.move_selected(row, col)
-                        print("CLICK:", (row, col), "moved=", moved, "turn=", game.turn)
+                    moved = game.move_selected(row, col)
+                    if not moved:
+                        game.select(row, col)
 
-                        if game.selected:
-                            print("selected:", (game.selected.row, game.selected.col), "valid_moves:", list(game.valid_moves.keys()))
-                        else:
-                            print("selected: None")
-
-                        if not moved:
-                            ok = game.select(row, col)
-                            print("select=", ok, "turn=", game.turn)
-                            if game.selected:
-                                print("selected:", (game.selected.row, game.selected.col), "valid_moves:", list(game.valid_moves.keys()))
-
-        renderer.draw(game)
+        renderer.draw(game, winner)
         pygame.display.flip()
 
     pygame.quit()
