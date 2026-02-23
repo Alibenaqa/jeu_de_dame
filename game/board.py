@@ -115,8 +115,8 @@ class Board:
         else:  # BLACK
             move_dirs = [(1, -1), (1, 1)]
 
-        # captures (avant seulement)
-        capture_dirs = move_dirs
+        # captures (avant ET arrière — règle enchaînement)
+        capture_dirs = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
 
         # 1) Déplacements simples
         for d_row, d_col in move_dirs:

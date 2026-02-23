@@ -1,35 +1,26 @@
 import pygame
+import threading
 
 from game.game import Game
 from game.piece import WHITE, BLACK
-from ui.renderer import Renderer, WIDTH, HEIGHT, SQUARE_SIZE, HUD_HEIGHT
-from ai.minimax_bot import MinimaxBot
+from ui.renderer import (Renderer, WIDTH, HEIGHT, SQUARE_SIZE,
+                          HUD_HEIGHT, BORDER, cell_center_px)
+from ai.minimax_bot import MinimaxBot, clone_board
 
-FPS = 60
-
-BOT_THINK_MS = 650     # < 1 seconde, “fait semblant”
-MOVE_ANIM_MS = 220     # vitesse de glisse d’un coup
-STEP_PAUSE_MS = 80     # mini pause entre étapes d’une chaîne
+FPS           = 60
+MOVE_ANIM_MS  = 220
+STEP_PAUSE_MS = 120
 
 
 def get_row_col_from_mouse(pos):
     x, y = pos
-    if y < HUD_HEIGHT:
+    if y < HUD_HEIGHT + BORDER:
         return None
-
-    y -= HUD_HEIGHT
-    row = y // SQUARE_SIZE
-    col = x // SQUARE_SIZE
-
+    col = (x - BORDER) // SQUARE_SIZE
+    row = (y - HUD_HEIGHT - BORDER) // SQUARE_SIZE
     if 0 <= row < 8 and 0 <= col < 8:
         return row, col
     return None
-
-
-def cell_center_px(row: int, col: int):
-    cx = col * SQUARE_SIZE + SQUARE_SIZE // 2
-    cy = HUD_HEIGHT + row * SQUARE_SIZE + SQUARE_SIZE // 2
-    return cx, cy
 
 
 def main():
@@ -37,188 +28,167 @@ def main():
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption("Jeu de dames")
 
-    clock = pygame.time.Clock()
+    clock    = pygame.time.Clock()
     renderer = Renderer(screen)
+    game     = Game()
 
-    game = Game()
-
-    # HUMAIN = BLACK, BOT = WHITE
     human_color = BLACK
-    bot = MinimaxBot(WHITE, depth=3)  # tu peux monter à 4 si c'est fluide
+    bot         = MinimaxBot(WHITE, depth=5)
 
-    # --- Bot state ---
-    bot_plan = None          # (start_pos, seq)
-    bot_seq_index = 0
-    bot_think_until = None
+    # Bot threading state
+    bot_plan          = None
+    bot_seq_index     = 0
     bot_step_ready_at = 0
+    bot_thread        = None
+    bot_result        = [None]
 
-    # --- Animation state ---
-    anim = None  # {"from":(r,c), "to":(r,c), "start":ms, "dur":ms, "meta":{...}}
-
-    # turn tracking (fix blocage)
+    # Animation state
+    anim      = None
     prev_turn = game.turn
+
+    def reset_game():
+        nonlocal game, bot_plan, bot_seq_index, bot_step_ready_at
+        nonlocal bot_thread, anim, prev_turn
+        game              = Game()
+        bot_plan          = None
+        bot_seq_index     = 0
+        bot_step_ready_at = 0
+        bot_thread        = None
+        bot_result[0]     = None
+        anim              = None
+        prev_turn         = game.turn
 
     running = True
     while running:
-        dt = clock.tick(FPS)
-        now = pygame.time.get_ticks()
-
+        clock.tick(FPS)
+        now    = pygame.time.get_ticks()
         winner = game.winner()
 
-        # update capture flash timer
         if game.capture_flash_frames > 0:
             game.capture_flash_frames -= 1
 
-        # -------------------------
-        # Update animation
-        # -------------------------
+        # ── Animation ────────────────────────────────────────────────
         moving_draw = None
         if anim is not None:
-            fr = anim["from"]
-            to = anim["to"]
-            start = anim["start"]
-            dur = anim["dur"]
-            meta = anim["meta"]
-
-            t = (now - start) / float(dur)
+            t = (now - anim["start"]) / float(anim["dur"])
             if t >= 1.0:
-                # animation finie -> on applique vraiment le move côté Game
-                tr, tc = to
-                game.move_selected(tr, tc)
-
+                game.move_selected(*anim["to"])
                 anim = None
                 bot_step_ready_at = now + STEP_PAUSE_MS
             else:
-                fx, fy = cell_center_px(fr[0], fr[1])
-                tx, ty = cell_center_px(to[0], to[1])
-                mx = fx + (tx - fx) * t
-                my = fy + (ty - fy) * t
-                moving_draw = {"from": fr, "pixel": (mx, my), "meta": meta}
+                fx, fy = cell_center_px(*anim["from"])
+                tx, ty = cell_center_px(*anim["to"])
+                moving_draw = {
+                    "from":  anim["from"],
+                    "pixel": (fx + (tx - fx) * t, fy + (ty - fy) * t),
+                    "meta":  anim["meta"],
+                }
 
-        # -------------------------
-        # Reset bot state on turn change (FIX)
-        # -------------------------
+        # ── Turn change ───────────────────────────────────────────────
         if game.turn != prev_turn:
-            bot_plan = None
-            bot_seq_index = 0
-            bot_think_until = None
+            bot_plan          = None
+            bot_seq_index     = 0
+            bot_thread        = None
+            bot_result[0]     = None
             bot_step_ready_at = now
-            prev_turn = game.turn
+            prev_turn         = game.turn
 
-        # -------------------------
-        # Events
-        # -------------------------
+        # ── Events ───────────────────────────────────────────────────
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
 
             if event.type == pygame.MOUSEBUTTONDOWN:
-                mouse_pos = pygame.mouse.get_pos()
+                mp = pygame.mouse.get_pos()
 
-                # reset button
-                if renderer.get_reset_rect().collidepoint(mouse_pos):
-                    game = Game()
-                    bot_plan = None
-                    bot_seq_index = 0
-                    bot_think_until = None
-                    bot_step_ready_at = 0
-                    anim = None
-                    prev_turn = game.turn
+                if renderer.get_reset_rect().collidepoint(mp):
+                    reset_game()
                     continue
 
-                if winner is not None:
+                if winner is not None or anim is not None:
                     continue
-
-                # si une animation est en cours, on ignore les clics
-                if anim is not None:
-                    continue
-
-                # si c'est le tour du bot, on ignore les clics
                 if game.turn != human_color:
                     continue
 
-                rc = get_row_col_from_mouse(mouse_pos)
+                rc = get_row_col_from_mouse(mp)
                 if rc is None:
                     continue
                 row, col = rc
 
-                # Recliquer la même pièce = annuler sélection (si pas en chaîne)
-                if game.selected is not None and (row, col) == (game.selected.row, game.selected.col):
+                if (game.selected is not None
+                        and (row, col) == (game.selected.row, game.selected.col)):
                     game.cancel_selection()
                     continue
 
-                # Sélection / move du joueur (AVEC animation)
                 if game.selected is None:
                     game.select(row, col)
                 else:
-                    # si destination valide -> on anime (au lieu de téléporter)
                     if (row, col) in game.valid_moves:
-                        fr = (game.selected.row, game.selected.col)
-                        piece = game.board.get_piece(fr[0], fr[1])
+                        fr    = (game.selected.row, game.selected.col)
+                        piece = game.board.get_piece(*fr)
                         if piece is not None:
                             anim = {
-                                "from": fr,
-                                "to": (row, col),
+                                "from":  fr,
+                                "to":    (row, col),
                                 "start": now,
-                                "dur": MOVE_ANIM_MS,
-                                "meta": {"color": piece.color, "is_king": piece.is_king},
+                                "dur":   MOVE_ANIM_MS,
+                                "meta":  {"color": piece.color,
+                                          "is_king": piece.is_king},
                             }
                     else:
-                        # sinon: essayer de sélectionner une autre pièce
                         game.select(row, col)
 
-        # -------------------------
-        # Bot thinking + bot animation play
-        # -------------------------
+        # ── Bot (threaded) ───────────────────────────────────────────
         bot_thinking = False
         if winner is None and game.turn == bot.color and anim is None:
-            # 1) si pas encore de plan, le bot calcule et démarre un timer de “réflexion”
+
             if bot_plan is None:
-                best = bot.choose_move_sequence(game.board, game.turn)
-                bot_plan = best
-                bot_seq_index = 0
-                bot_think_until = now + BOT_THINK_MS
-                bot_step_ready_at = bot_think_until
+                if bot_thread is None:
+                    board_snap = clone_board(game.board)
+                    turn_snap  = game.turn
+                    bot_result[0] = None
 
-            # 2) attendre un peu (fake thinking)
-            if bot_think_until is not None and now < bot_think_until:
-                bot_thinking = True
-            else:
-                # 3) exécuter la séquence, étape par étape, avec animation
-                if bot_plan is not None:
-                    start_pos, seq = bot_plan
+                    def _think(b=board_snap, t=turn_snap):
+                        bot_result[0] = bot.choose_move_sequence(b, t)
 
-                    # sélectionner la pièce au début
-                    if bot_seq_index == 0 and game.selected is None:
-                        sr, sc = start_pos
-                        game.select(sr, sc)
+                    bot_thread = threading.Thread(target=_think, daemon=True)
+                    bot_thread.start()
 
-                    # si c’est le moment de jouer la prochaine étape
-                    if (
-                        now >= bot_step_ready_at
+                if bot_thread is not None and bot_thread.is_alive():
+                    bot_thinking = True
+                else:
+                    bot_plan          = bot_result[0]
+                    bot_thread        = None
+                    bot_seq_index     = 0
+                    bot_step_ready_at = now + 280
+
+            if bot_plan is not None:
+                start_pos, seq = bot_plan
+
+                if bot_seq_index == 0 and game.selected is None:
+                    game.select(*start_pos)
+
+                if (now >= bot_step_ready_at
                         and bot_seq_index < len(seq)
-                        and game.selected is not None
-                    ):
-                        fr = (game.selected.row, game.selected.col)
-                        to = seq[bot_seq_index]
+                        and game.selected is not None):
+                    fr    = (game.selected.row, game.selected.col)
+                    to    = seq[bot_seq_index]
+                    piece = game.board.get_piece(*fr)
+                    if piece is None:
+                        bot_plan   = None
+                        bot_thread = None
+                    else:
+                        anim = {
+                            "from":  fr,
+                            "to":    to,
+                            "start": now,
+                            "dur":   MOVE_ANIM_MS,
+                            "meta":  {"color": piece.color,
+                                      "is_king": piece.is_king},
+                        }
+                        bot_seq_index += 1
 
-                        piece = game.board.get_piece(fr[0], fr[1])
-                        if piece is None:
-                            bot_plan = None
-                            bot_think_until = None
-                        else:
-                            anim = {
-                                "from": fr,
-                                "to": to,
-                                "start": now,
-                                "dur": MOVE_ANIM_MS,
-                                "meta": {"color": piece.color, "is_king": piece.is_king},
-                            }
-                            bot_seq_index += 1
-
-        # -------------------------
-        # Draw
-        # -------------------------
+        # ── Draw ─────────────────────────────────────────────────────
         renderer.draw(game, winner, thinking=bot_thinking, moving=moving_draw)
         pygame.display.flip()
 
